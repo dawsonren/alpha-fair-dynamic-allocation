@@ -67,11 +67,9 @@ class TestAllocationSolver(unittest.TestCase):
             Z_a, _ = instance.solve(ex_ante=True)
             Z_p, _ = instance.solve(ex_ante=False)
             
-            # Z_a and Z_p and Manshadi's objectives are all 1
+            # Z_a and Z_p
             self.assertAlmostEqual(Z_a, 1)
             self.assertAlmostEqual(Z_p, 1)
-            self.assertAlmostEqual(instance.manshadi_ex_ante.min(), 1)
-            self.assertAlmostEqual(instance.manshadi_ex_post, 1)
             
 
         random_property_test(

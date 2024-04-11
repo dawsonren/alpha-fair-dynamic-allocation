@@ -1,8 +1,6 @@
-from typing import List, Tuple, Optional
-from itertools import permutations
-from functools import lru_cache
+from typing import List, Optional
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -40,37 +38,28 @@ class State:
 @dataclass
 class ExtraState:
     """
-    The value a = (p, beta_min, verbosity, calc), where
+    The value a = (p, verbosity, allocations, demands), where
     - p is the probability you're on the current sample path
-    - beta_min is the minimum fill rate you've seen so far
     - verbosity is the level of output
-    - calc is whether to calculate Manshadi's objectives
-
-    These aren't states for our DP/MDP, but are useful for passing around
-    because they stay the same throughout the recursion - that is, if calc
-    is true at time 0, then it's true for all future times.
-
-    For example, verbosity is useful for controlling the level of output
-    on a specific evaluation - when we're looking for optimal policies,
-    we don't want to print everything, but when we're evaluating a policy,
-    we do.
+    - allocations is the list of allocations so far
+    - demands is the list of demands so far
     """
     p: np.float64
-    beta_min: np.float64
     verbosity: int
-    calc: bool
+    allocations: List[np.float64] = field(default_factory=list)
+    demands: List[np.float64] = field(default_factory=list)
 
-    def next_state(self, p_next, fill_rate):
+    def next_state(self, p_next, alloc, demand):
         """
         Update the state to the next state.
         """
-        return ExtraState(self.p * p_next, min(fill_rate, self.beta_min), self.verbosity, self.calc)
+        return ExtraState(self.p * p_next, self.verbosity, self.allocations + [alloc], self.demands + [demand])
     
     def silence(self):
         """
         Make is so that verbosity is set to 0, and calc is set to False.
         """
-        return ExtraState(self.p, self.beta_min, 0, False)
+        return ExtraState(self.p, 0, self.allocations, self.demands)
 
 def normalize_demands(demand_distributions):
     """
@@ -79,9 +68,31 @@ def normalize_demands(demand_distributions):
     total_demand = sum([dist.mean() for dist in demand_distributions])
     return [dist.scale(1 / total_demand) for dist in demand_distributions]
 
+def social_welfare_relative(alpha):
+    """
+    Calculate the social welfare of the allocation.
+    """
+    if alpha == 1:
+        return lambda allocs, demands: math.prod([min(alloc / demand, 1) ** (demand / sum(demands)) for alloc, demand in zip(allocs, demands)])
+    elif alpha == np.inf:
+        return lambda allocs, demands: min([min(alloc / demand, 1) for alloc, demand in zip(allocs, demands)])
+    else:
+        return lambda allocs, demands: ((1 / sum(demands)) * sum([demand * min(alloc / demand, 1) ** (1 - alpha) for alloc, demand in zip(allocs, demands)])) ** (1 / (1 - alpha))
+
+def social_welfare_absolute(alpha):
+    """
+    Calculate the social welfare of the allocation.
+    """
+    if alpha == 1:
+        return lambda allocs, demands: math.prod([min(alloc / demand, 1) ** (1 / len(allocs)) for alloc, demand in zip(allocs, demands)])
+    elif alpha == np.inf:
+        return lambda allocs, demands: min([min(alloc / demand, 1) for alloc, demand in zip(allocs, demands)])
+    else:
+        return lambda allocs, demands: sum([(1 / len(allocs)) * min(alloc / demand, 1) ** (1 - alpha) for alloc, demand in zip(allocs, demands)]) ** (1 / (1 - alpha))
+
 class AllocationSolver:
     """
-    This class represents the max-min fill rate allocation problem.
+    This class represents the alpha-fair dynamic allocation problem.
 
     At time i, the we arrive at the ith node.
     """
@@ -90,7 +101,9 @@ class AllocationSolver:
         self,
         demand_distributions: List[Distribution],
         initial_supply,
+        alpha=np.inf,
         allocation_method="exact",
+        equity="relative",
         tfr=None,
         verbosity=0,
         alloc_step=0.1,
@@ -113,6 +126,16 @@ class AllocationSolver:
         # discretizations, the increment of optimal allocation
         self.alloc_step = alloc_step
 
+        # the inequity aversion parameter alpha
+        self.alpha = alpha
+
+        # the equity criterion
+        if equity not in ["absolute", "relative"]:
+            raise ValueError("Equity must be either absolute or relative.")
+        
+        # the social welfare function
+        self.social_welfare = social_welfare_absolute(alpha) if equity == "absolute" else social_welfare_relative(alpha)
+
         # verbosity = 0, no output, = 1, log all except final allocation, >= 2, log all
         # this is the overall verbosity, we control each evaluation's verbosity with ExtraState
         self.verbosity = verbosity
@@ -129,73 +152,53 @@ class AllocationSolver:
         self.allocation_method = allocation_method
         self.allocation_function = self.allocation_method_to_function[allocation_method]
 
-        # keeps track of expected fill rate at each node
-        # at the end, take the minimum to get their ex-ante objective
-        self.manshadi_ex_ante = np.zeros(self.N)
-        # keeps track of expected fill rate across sample paths
-        # use the parameter p to update, this contains the probability of being on a given sample path
-        self.manshadi_ex_post = 0
-
     def change_initial_supply(self, initial_supply):
         self.initial_supply = initial_supply
 
     def max_supply_needed(self):
         return sum([dist.max() for dist in self.demand_distributions])
 
-    def find_min_fill_rate_and_waste(self, t, state: State, x, extra: ExtraState):
-        def realized_demand_find_min_fill_rate_and_waste(d_next, p_next):
-            fill_rate = min(x / state.d, 1)
-            Z, w = self.evaluate_allocation_policy(
-                t + 1, state.next_state(x, d_next), extra.next_state(p_next, fill_rate)
-            )
-            return min(Z, fill_rate), w
-
+    def find_welfare_and_waste(self, t, state: State, x, extra: ExtraState):
         return self.demand_distributions[t].expect_with_prob(
             lambda d_next, p_next: np.array(
-                realized_demand_find_min_fill_rate_and_waste(d_next, p_next)
+                self.evaluate_allocation_policy(
+                    t + 1, state.next_state(x, d_next), extra.next_state(p_next, x, state.d)
+                )
             )
         )
     
-    def find_min_fill_rate_and_waste_ex_ante(self, t, state: State, x, extra: ExtraState):
+    def find_welfare_and_waste_ex_ante(self, t, state: State, x, extra: ExtraState):
         Z, w = self.evaluate_allocation_policy_ex_ante(t + 1, state.next_state_ex_ante(x), extra)
-        fill_rate = x / state.d
-        return min(fill_rate, Z), w
+        return Z, w
 
     def evaluate_allocation_policy_ex_ante(self, t, state: State, extra: ExtraState):
-        def realized_demand_find_min_fill_rate_and_waste(d_i, p_i):
+        def realized_demand_find_welfare_and_waste(d_i, p_i):
             if t == self.N:
-                Z, w = min(1, state.c / d_i), max(state.c - d_i, 0)
+                # if we're at the last node
+                alloc = min(state.c, d_i)
+                Z, w = self.social_welfare(extra.allocations + [alloc], extra.demands + [d_i]), max(state.c - d_i, 0)
                 if self.verbosity >= 2 and extra.verbosity == 1:
                     print(
                         f"At time {t} with d_t={d_i} and c_t={state.c}, allocate what's left with Z={round(Z, 2)} and waste={round(w, 2)}."
                     )
-                
-                if extra.calc:
-                    # recall t is one-indexed
-                    self.manshadi_ex_ante[t - 1] += extra.p * p_i * Z
-                    self.manshadi_ex_post += extra.p * p_i * min(Z, extra.beta_min)
 
                 return Z, w
             
             x = self.allocation_function(t, state.update_demand_ex_ante(d_i), extra, ex_ante=True)
-            fill_rate = x / d_i
             Z, w = self.evaluate_allocation_policy_ex_ante(
-                t + 1, state.next_state_ex_ante(x), extra.next_state(p_i, fill_rate)
+                t + 1, state.next_state_ex_ante(x), extra.next_state(p_i, x, d_i)
             )
 
             if self.verbosity >= 1 and extra.verbosity == 1:
                 print(
                     f"At time {t} with d_t={d_i} and c_t={state.c}, we allocate x_t={x}."
                 )
-
-            if extra.calc:
-                self.manshadi_ex_ante[t - 1] += extra.p * p_i * fill_rate
             
-            return min(Z, fill_rate), w
+            return Z, w
             
         return self.demand_distributions[t - 1].expect_with_prob(
             lambda d_next, p_next: np.array(
-                realized_demand_find_min_fill_rate_and_waste(d_next, p_next)
+                realized_demand_find_welfare_and_waste(d_next, p_next)
             )
         )
 
@@ -203,19 +206,13 @@ class AllocationSolver:
         """
         Inputs:
         - t - the current time
-        - i - the current node
-        - c_t - the supply available to us at time t
-        - S_t - the set of nodes we have yet to visit
-        - d_t - the demand at time t
-        - p - the probability of being on the current sample path (from time 1 to t)
+        - State - the current state (c_t, d_t)
+        - ExtraState - the extra state (p, beta_min, verbosity, calc)
         """
         if t == self.N:
             # if we're at the last node
-            Z, w = min(1, state.c / state.d), max(state.c - state.d, 0)
-
-            if extra.calc:
-                self.manshadi_ex_ante[t - 1] += extra.p * Z
-                self.manshadi_ex_post += extra.p * min(Z, extra.beta_min)
+            alloc = min(state.c, state.d)
+            Z, w = self.social_welfare(extra.allocations + [alloc], extra.demands + [state.d]), max(state.c - state.d, 0)
 
             if self.verbosity >= 2 and extra.verbosity == 1:
                 print(
@@ -223,11 +220,7 @@ class AllocationSolver:
                 )
         else:
             x = self.allocation_function(t, state, extra, ex_ante=False)
-            Z, w = self.find_min_fill_rate_and_waste(t, state, x, extra)
-            fill_rate = x / state.d
-
-            if extra.calc:
-                self.manshadi_ex_ante[t - 1] += extra.p * fill_rate
+            Z, w = self.find_welfare_and_waste(t, state, x, extra)
 
             if self.verbosity >= 1 and extra.verbosity == 1:
                 print(
@@ -242,17 +235,17 @@ class AllocationSolver:
         The brute-force optimal allocation for nodes i to the end.
 
         Given:
-        - state - the current state (c_t, i, d_t, S_t)
+        - state - the current state (c_t, d_t)
 
         Returns:
         - x_t, the optimal allocation at time t
         """
         # discretize to beta level
-        x_values = np.arange(0, state.c + self.alloc_step / 2, self.alloc_step)
+        x_values = np.arange(self.alloc_step, state.c + self.alloc_step / 2, self.alloc_step)
         best_z = 0
         best_x = 0
 
-        evaluator = self.find_min_fill_rate_and_waste_ex_ante if ex_ante else self.find_min_fill_rate_and_waste
+        evaluator = self.find_welfare_and_waste_ex_ante if ex_ante else self.find_welfare_and_waste
 
         # search through all possible allocations
         for x in x_values:
@@ -280,23 +273,19 @@ class AllocationSolver:
     
     def solve(self, ex_ante=False) -> np.ndarray[np.float64, np.float64]:
         """
-        Solves the max-min fill rate problem.
+        Solves the alpha-fair dynamic allocation problem.
 
-        Returns the max-min fill rate and the waste as a tuple (Z, w)
+        Returns the welfare and the waste as a tuple (Z, w)
         """
-        # reset manshadi objectives
-        self.manshadi_ex_ante = np.zeros(self.N)
-        self.manshadi_ex_post = 0
-
         if not ex_ante:
             return self.demand_distributions[0].expect_with_prob(
                 lambda d, p: np.array(
-                    self.evaluate_allocation_policy(1, State(self.initial_supply, d), ExtraState(p, 1, 1, True))
+                    self.evaluate_allocation_policy(1, State(self.initial_supply, d), ExtraState(p, 1, [], []))
                 )
             )
         else:
             # solve
-            return self.evaluate_allocation_policy_ex_ante(1, State(self.initial_supply, None), ExtraState(1, 1, 1, True))
+            return self.evaluate_allocation_policy_ex_ante(1, State(self.initial_supply, None), ExtraState(1, 1, [], []))
     
     def solve_all(self):
         """
@@ -331,7 +320,7 @@ class AllocationSolver:
                 d_t = d_t[0]
                 p_t = p_t[0]
                 p *= p_t
-                x_t = self.allocation_function(t, State(c_t, d_t), ExtraState(p, 1, 0, False), ex_ante=ex_ante)
+                x_t = self.allocation_function(t, State(c_t, d_t), ExtraState(p, 0, [], []), ex_ante=ex_ante)
 
                 # index by the node index, not index on the path
                 fill_rate_at_node[t - 1] += min(x_t / d_t, 1)
