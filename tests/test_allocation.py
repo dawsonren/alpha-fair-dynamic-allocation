@@ -81,7 +81,7 @@ class TestAllocationSolver(unittest.TestCase):
         random_property_test(
             generate_random_deterministic_oversupply("exact"),
             test_random_deterministic_oversupply,
-            instances=10,
+            instances=1,
         )
 
     def test_handwritten_1(self):

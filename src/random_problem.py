@@ -46,7 +46,7 @@ def generate_symmetric_discrete_distribution(mean=None, p=None, d=None, relative
 # 3. Nested supports for the distributions
 
 # generate random problem
-def generate_random_problem(N, distribution_generator=None, allocation_method="ppa", sequence_method="static", reorder_to_inc_cv=False):
+def generate_random_problem(N, distribution_generator=None, allocation_method="ppa", alloc_step=0.1):
     """
     N: int, number of nodes
     dist_type: int, type of distribution to use, if number, then generates distribution with that many points
@@ -60,5 +60,5 @@ def generate_random_problem(N, distribution_generator=None, allocation_method="p
 
     mean_demand = sum([d.mean() for d in demand_distributions])
 
-    solver = AllocationSolver(demand_distributions, mean_demand, allocation_method=allocation_method, sequence_method=sequence_method, reorder_to_inc_cv=reorder_to_inc_cv)
+    solver = AllocationSolver(demand_distributions, mean_demand, allocation_method=allocation_method, alloc_step=alloc_step)
     return solver

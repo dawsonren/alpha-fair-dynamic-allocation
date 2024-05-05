@@ -10,7 +10,6 @@ This file provides the following distributions:
 
 """
 import math
-from statistics import fmean
 
 import numpy as np
 import scipy as sp
@@ -27,7 +26,7 @@ class Distribution:
         self.xk, self.pk = zip(*sorted(zip(self.xk, self.pk)))
 
         # just precompute these
-        self.mean_val = fmean(xk, pk)
+        self.mean_val = self.expect(lambda x: x)
         # Var[X] = E[X^2] - E[X]^2
         self.stddev_val = math.sqrt(self.expect(lambda x: x**2) - self.mean() ** 2)
         self.min_val = min(xk)

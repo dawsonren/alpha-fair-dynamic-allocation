@@ -73,22 +73,48 @@ def social_welfare_relative(alpha):
     Calculate the social welfare of the allocation.
     """
     if alpha == 1:
-        return lambda allocs, demands: math.prod([min(alloc / demand, 1) ** (demand / sum(demands)) for alloc, demand in zip(allocs, demands)])
+        def nsw_relative(allocs, demands):
+            total_demand = sum(demands)
+            utilities = [min(alloc / demand, 1) if demand > 0 else 1 for alloc, demand in zip(allocs, demands)]
+            proportions = [demand / total_demand for demand in demands]
+            return math.prod([u ** p for u, p in zip(utilities, proportions)])
+        return nsw_relative
     elif alpha == np.inf:
-        return lambda allocs, demands: min([min(alloc / demand, 1) for alloc, demand in zip(allocs, demands)])
+        def ks_relative(allocs, demands):
+            utilities = [min(alloc / demand, 1) if demand > 0 else 1 for alloc, demand in zip(allocs, demands)]
+            return min(utilities)
+        return ks_relative
     else:
-        return lambda allocs, demands: ((1 / sum(demands)) * sum([demand * min(alloc / demand, 1) ** (1 - alpha) for alloc, demand in zip(allocs, demands)])) ** (1 / (1 - alpha))
+        def alpha_relative(allocs, demands):
+            total_demand = sum(demands)
+            utilities = [min(alloc / demand, 1) if demand > 0 else 1 for alloc, demand in zip(allocs, demands)]
+            return ((1 / total_demand) * sum([demand * u ** (1 - alpha) for u, demand in zip(utilities, demands)])) ** (1 / (1 - alpha))
+        return alpha_relative
 
 def social_welfare_absolute(alpha):
     """
     Calculate the social welfare of the allocation.
     """
     if alpha == 1:
-        return lambda allocs, demands: math.prod([min(alloc / demand, 1) ** (1 / len(allocs)) for alloc, demand in zip(allocs, demands)])
+        def nsw_absolute(allocs, demands):
+            utilities = [min(alloc / demand, 1) if demand > 0 else 1 for alloc, demand in zip(allocs, demands)]
+            n = len(allocs)
+            return math.prod([u ** (1 / n) for u in utilities])
+        return nsw_absolute
     elif alpha == np.inf:
-        return lambda allocs, demands: min([min(alloc / demand, 1) for alloc, demand in zip(allocs, demands)])
+        def ks_absolute(allocs, demands):
+            utilities = [min(alloc / demand, 1) if demand > 0 else 1 for alloc, demand in zip(allocs, demands)]
+            return min(utilities)
+        return ks_absolute
     else:
-        return lambda allocs, demands: sum([(1 / len(allocs)) * min(alloc / demand, 1) ** (1 - alpha) for alloc, demand in zip(allocs, demands)]) ** (1 / (1 - alpha))
+        def alpha_absolute(allocs, demands):
+            n = len(allocs)
+            utilities = [min(alloc / demand, 1) if demand > 0 else 1 for alloc, demand in zip(allocs, demands)]
+            return sum([(1 / n) * u ** (1 - alpha) for u in utilities]) ** (1 / (1 - alpha))
+        return alpha_absolute
+
+def empty_extra_state():
+    return ExtraState(1, 0, [], [])
 
 class AllocationSolver:
     """
@@ -104,7 +130,6 @@ class AllocationSolver:
         alpha=np.inf,
         allocation_method="exact",
         equity="relative",
-        tfr=None,
         verbosity=0,
         alloc_step=0.1,
         normalize_demand=False
@@ -141,19 +166,23 @@ class AllocationSolver:
         self.verbosity = verbosity
 
         # set up the allocation and sequencing functions
-        if tfr is None and allocation_method == "tfr":
-            raise ValueError("Must specify target fill rate.")
-
         self.allocation_method_to_function = {
             "exact": self.optimal_allocation,
-            "ppa": self.ppa_allocation,
-            "tfr": self.tfr_allocation(tfr=tfr),
+            "ppa": self.ppa_allocation
         }
         self.allocation_method = allocation_method
         self.allocation_function = self.allocation_method_to_function[allocation_method]
 
     def change_initial_supply(self, initial_supply):
         self.initial_supply = initial_supply
+
+    def change_allocation_method(self, allocation_method):
+        self.allocation_method = allocation_method
+        self.allocation_function = self.allocation_method_to_function[allocation_method]
+
+    def change_alpha(self, alpha, equity="relative"):
+        # the social welfare function
+        self.social_welfare = social_welfare_absolute(alpha) if equity == "absolute" else social_welfare_relative(alpha)
 
     def max_supply_needed(self):
         return sum([dist.max() for dist in self.demand_distributions])
@@ -179,7 +208,7 @@ class AllocationSolver:
                 Z, w = self.social_welfare(extra.allocations + [alloc], extra.demands + [d_i]), max(state.c - d_i, 0)
                 if self.verbosity >= 2 and extra.verbosity == 1:
                     print(
-                        f"At time {t} with d_t={d_i} and c_t={state.c}, allocate what's left with Z={round(Z, 2)} and waste={round(w, 2)}."
+                        f"At time {t} with d_t={d_i} and c_t={state.c}, allocate what's left with Z={round(Z, 4)} and waste={round(w, 4)}."
                     )
 
                 return Z, w
@@ -216,7 +245,7 @@ class AllocationSolver:
 
             if self.verbosity >= 2 and extra.verbosity == 1:
                 print(
-                    f"At time {t} with d_t={state.d} and c_t={state.c}, allocate what's left with Z={round(Z, 2)} and waste={round(w, 2)}."
+                    f"At time {t} with d_t={state.d} and c_t={state.c}, allocate what's left with Z={round(Z, 4)} and waste={round(w, 4)}."
                 )
         else:
             x = self.allocation_function(t, state, extra, ex_ante=False)
@@ -240,8 +269,13 @@ class AllocationSolver:
         Returns:
         - x_t, the optimal allocation at time t
         """
-        # discretize to beta level
-        x_values = np.arange(self.alloc_step, state.c + self.alloc_step / 2, self.alloc_step)
+        # the range of x values should be the minimum of d and c
+        # subtract machine epsilon to avoid giving all capacity away
+        # we only would do this when we're at the last node, which
+        # is already handled by another function
+        x_values = np.arange(self.alloc_step,
+                             min(state.d + 3 * self.alloc_step / 2, state.c - np.finfo(np.float32).eps),
+                             self.alloc_step)
         best_z = 0
         best_x = 0
 
@@ -264,14 +298,8 @@ class AllocationSolver:
             [self.demand_distributions[i].mean() for i in range(t, self.N)]
         )
         return np.min([state.d, state.c * (state.d / (state.d + expected_future_demand))], axis=0)
-
-    def tfr_allocation(self, tfr):
-        def alloc(t, state: State, extra: ExtraState, ex_ante=False):
-            return min(tfr * state.d, state.c)
-
-        return alloc
     
-    def solve(self, ex_ante=False) -> np.ndarray[np.float64, np.float64]:
+    def solve(self, ex_ante=False):
         """
         Solves the alpha-fair dynamic allocation problem.
 
@@ -285,7 +313,7 @@ class AllocationSolver:
             )
         else:
             # solve
-            return self.evaluate_allocation_policy_ex_ante(1, State(self.initial_supply, None), ExtraState(1, 1, [], []))
+            return self.evaluate_allocation_policy_ex_ante(1, State(self.initial_supply, None), ExtraState(1, self.verbosity, [], []))
     
     def solve_all(self):
         """
@@ -350,7 +378,36 @@ class AllocationSolver:
         plt.ylim(0, 1)
         plt.show()
 
-    def __str__(self) -> str:
+    def provide_Z_vs_x_plot_data(self, t, state: State, ex_ante=False):
+        """
+        Returns the Z value for each possible allocation at some state.
+        """
+        x_values = np.arange(self.alloc_step, state.c + self.alloc_step, self.alloc_step)
+        Z_values = np.zeros(x_values.size)
+
+        evaluator = self.find_welfare_and_waste_ex_ante if ex_ante else self.find_welfare_and_waste
+
+        for i, x in enumerate(x_values):
+            Z_values[i], _ = evaluator(
+                t, state, x, empty_extra_state()
+            )
+
+        return x_values, Z_values
+
+    def provide_x_vs_d_plot_data(self, t, state: State, step, ex_ante=False):
+        """
+        Provide the policy mapping from the demand to the allocation.
+        """
+        d_values = np.arange(step, state.d, step)
+        x_values = np.zeros(d_values.size)
+
+        for i, d in enumerate(d_values):
+            alt_state = State(state.c, d)
+            x_values[i] = self.allocation_function(t + 1, alt_state, empty_extra_state(), ex_ante)
+
+        return d_values, x_values
+
+    def __str__(self):
         s = []
         for i, dist in enumerate(self.demand_distributions):
             s.append(f"Node {i}: {str(dist)}")
