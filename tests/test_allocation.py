@@ -10,7 +10,7 @@ import numpy as np
 from src.AllocationSolver import AllocationSolver, State, ExtraState
 from src.dists import Distribution, UniformDistribution, SymmetricDiscreteDistribution
 from src.monte_carlo import hoeffding_bound
-from src.random_problem import generate_random_problem
+from src.random_problem import generate_random_problem, generate_general_distribution
 
 from tests.random_property_test import random_property_test
 
@@ -64,12 +64,8 @@ class TestAllocationSolver(unittest.TestCase):
 
         # property that we want to test
         def test_random_deterministic_oversupply(instance: AllocationSolver):
-            Z_a, _ = instance.solve(ex_ante=True)
-            Z_p, _ = instance.solve(ex_ante=False)
-            
-            # Z_a and Z_p
-            self.assertAlmostEqual(Z_a, 1)
-            self.assertAlmostEqual(Z_p, 1)
+            Z, _ = instance.solve()
+            self.assertAlmostEqual(Z, 1)
             
 
         random_property_test(
@@ -98,9 +94,9 @@ class TestAllocationSolver(unittest.TestCase):
         node_3 = UniformDistribution(1, 3, n=3)
         solver = AllocationSolver([node_1, node_2, node_3], initial_supply=8)
 
-        self.assertEqual(solver.ppa_allocation(1, State(8, 5), 0, ExtraState(1, 1, 0, 0)), 8 * (5 / 11))
-        self.assertEqual(solver.ppa_allocation(1, State(8, 6), 0, ExtraState(1, 1, 0, 0)), 4)
-        self.assertEqual(solver.ppa_allocation(2, State(4, 3), 2, ExtraState(1, 1, 0, 0)), 2.4)
+        self.assertEqual(solver.ppa_allocation(1, State(8, 5), ExtraState(1, 1, 0, 0)), 8 * (5 / 11))
+        self.assertEqual(solver.ppa_allocation(1, State(8, 6), ExtraState(1, 1, 0, 0)), 4)
+        self.assertEqual(solver.ppa_allocation(2, State(4, 3), ExtraState(1, 1, 0, 0)), 2.4)
 
     def test_uniform_specific(self):
         # compare to raw DP, encountered in testing
@@ -164,6 +160,26 @@ class TestAllocationSolver(unittest.TestCase):
             test_uniform_random_generation_instance,
             instances=10,
         )
+
+    def test_monte_carlo(self):
+        random.seed(42)
+        # set numpy seed
+        np.random.seed(42)
+
+        def test_monte_carlo_instance(prob):
+            n = hoeffding_bound(0.01, 0.01)
+            Z, w = prob.solve()
+            metrics = prob.monte_carlo_performance_metrics(n)
+
+            self.assertAlmostEqual(metrics["social_welfare"], Z, places=2)
+            self.assertAlmostEqual(metrics["waste"], w, places=2)
+
+        random_property_test(
+            lambda: generate_random_problem(4, generate_general_distribution(4), "ppa"),
+            test_monte_carlo_instance,
+            instances=10
+        )
+        
 
 if __name__ == "__main__":
     unittest.main()

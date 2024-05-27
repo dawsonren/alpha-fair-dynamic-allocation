@@ -44,6 +44,10 @@ class Distribution:
 
     def stddev(self):
         return self.stddev_val
+    
+    def median(self):
+        # the median value of the support
+        return self.xk[np.argmax(np.cumsum(self.pk) >= 0.5)]
 
     def cv(self):
         return self.stddev_val / self.mean_val
@@ -135,5 +139,40 @@ class GammaDistribution(ContinuousApproximation):
         super().__init__(
             lambda x: sp.stats.gamma.pdf(x, a=shape, scale=scale),
             lambda p: sp.stats.gamma.ppf(p, a=shape, scale=scale),
+            n,
+        )
+
+class PoissonDistribution(Distribution):
+    def __init__(self, rate, n):
+        """
+        Discrete Poisson distribution, shifted to the right by 1.
+        Give all probability above n to 1.
+        """
+        xk = [i + 1 for i in range(n)]
+        pk = [sp.stats.poisson.pmf(i, rate) for i in range(n)]
+        pk[0] += 1 - sum(pk) # give probability to 1
+        super().__init__(xk, pk)
+
+class ExponentialDistribution(ContinuousApproximation):
+    def __init__(self, mean, n=10):
+        """
+        Approximate with continuous exponential distribution.
+        """
+        rate = 1 / mean
+        super().__init__(
+            lambda x: sp.stats.expon.pdf(x, scale=1 / rate),
+            lambda p: sp.stats.expon.ppf(p, scale=1 / rate),
+            n,
+        )
+
+class ParetoDistribution(ContinuousApproximation):
+    def __init__(self, mean, n=10):
+        """
+        Approximate with continuous Pareto distribution.
+        """
+        alpha = mean / (mean - 1)
+        super().__init__(
+            lambda x: sp.stats.pareto.pdf(x, b=alpha),
+            lambda p: sp.stats.pareto.ppf(p, b=alpha),
             n,
         )

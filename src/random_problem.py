@@ -4,7 +4,7 @@ Generate random AllocationSolver instances for testing and theorem proving
 import random
 
 from src.AllocationSolver import AllocationSolver
-from src.dists import Distribution, SymmetricDiscreteDistribution
+from src.dists import Distribution, SymmetricDiscreteDistribution, NormalDistribution, ParetoDistribution
 
 def generate_general_distribution(dist_points=2):
     """
@@ -38,6 +38,32 @@ def generate_symmetric_discrete_distribution(mean=None, p=None, d=None, relative
             if m <= delta: raise ValueError("Mean must be greater than delta")
 
         return SymmetricDiscreteDistribution(mean=m, stddev=delta, p=p_val)
+    
+    return gen_dist
+
+def generate_normal_distribution(mean=(1, 2), cv=0.2, n=10):
+    """
+    mean: tuple, range of means to generate
+    stddev: float, standard deviation of the distribution
+    n: int, number of points to generate
+    """
+    def gen_dist():
+        a, b = mean
+        m = random.random() * (b - a) + a
+        sd = cv * m
+        return NormalDistribution(mean=m, stddev=sd, n=n)
+    
+    return gen_dist
+
+def generate_pareto_distribution(mean=(1, 2), n=10):
+    """
+    mean: tuple, range of means to generate
+    n: int, number of points to generate
+    """
+    def gen_dist():
+        a, b = mean
+        m = random.random() * (b - a) + a
+        return ParetoDistribution(mean=m, n=n)
     
     return gen_dist
 
