@@ -4,7 +4,7 @@ Generate random AllocationSolver instances for testing and theorem proving
 import random
 
 from src.AllocationSolver import AllocationSolver
-from src.dists import Distribution, SymmetricDiscreteDistribution, NormalDistribution, ParetoDistribution
+from src.dists import Distribution, SymmetricDiscreteDistribution, NormalDistribution, ParetoDistribution, UniformDistribution
 
 def generate_general_distribution(dist_points=2):
     """
@@ -67,12 +67,20 @@ def generate_pareto_distribution(mean=(1, 2), n=10):
     
     return gen_dist
 
-# TODO: add more structure to these problems
-# 2. Same variance
-# 3. Nested supports for the distributions
+def generate_uniform_distribution(mean=(1, 2), n=10):
+    """
+    mean: tuple, range of means to generate
+    n: int, number of points to generate
+    """
+    def gen_dist():
+        a, b = mean
+        a, b = list(sorted([random.random() * (b - a) + a, random.random() * (b - a) + a]))
+        return UniformDistribution(a, b, n=n)
+    
+    return gen_dist
 
 # generate random problem
-def generate_random_problem(N, distribution_generator=None, allocation_method="ppa", alloc_step=0.1):
+def generate_random_problem(N, distribution_generator=None, allocation_method="ppa", alloc_step=0.1, supply_scarcity=1):
     """
     N: int, number of nodes
     dist_type: int, type of distribution to use, if number, then generates distribution with that many points
@@ -86,5 +94,8 @@ def generate_random_problem(N, distribution_generator=None, allocation_method="p
 
     mean_demand = sum([d.mean() for d in demand_distributions])
 
-    solver = AllocationSolver(demand_distributions, mean_demand, allocation_method=allocation_method, alloc_step=alloc_step)
+    solver = AllocationSolver(demand_distributions=demand_distributions,
+                              initial_supply=mean_demand * supply_scarcity,
+                              allocation_method=allocation_method,
+                              alloc_step=alloc_step)
     return solver

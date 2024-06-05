@@ -9,9 +9,9 @@ import matplotlib.collections as mc
 import matplotlib.cm as cm
 from matplotlib.lines import Line2D
 import seaborn as sns
+from tqdm import tqdm
 
-from src.AllocationSolver import AllocationSolver, State, ExtraState
-from src.monte_carlo import hoeffding_bound
+from src.AllocationSolver import AllocationSolver, State
 
 map_metric_to_latex = {
     "social_welfare": r"$\mathbb{E}[U_{\alpha}]$",
@@ -24,13 +24,11 @@ map_metric_to_latex = {
 map_algo_to_name = {
     "exact": "Exact",
     "ppa": "PPA",
-    "lambda_time": "PPA-F",
-    "greedy": "Greedy",
-    "max_demand": "MaxDemand",
-    "lien": "MaxMin",
-    "hope_guardrail_12": r"GuardedHope $L_t=\frac{1}{2}$",
-    "hope_guardrail_13": r"GuardedHope $L_t=\frac{1}{3}$",
-    "saffe": "SAFFE"
+    "lambda_time": "PPA-AF",
+    "lambda": r"PPA-AF (Constant $\lambda$)",
+    "greedy": "GREEDY",
+    "guarantee": "GUARANTEE",
+    "hope_online": "hope_online"
 }
 
 # mpl colors
@@ -38,12 +36,10 @@ map_algo_to_color = {
     "exact": "tab:purple",
     "ppa": "tab:orange",
     "lambda_time": "tab:blue",
+    "lambda": "tab:cyan",
     "greedy": "tab:green",
-    "max_demand": "tab:red",
-    "lien": "tab:purple",
-    "hope_guardrail_12": "tab:brown",
-    "hope_guardrail_13": "tab:pink",
-    "saffe": "tab:gray"
+    "guarantee": "tab:red",
+    "hope_online": "tab:gray"
 }
 
 def plot_x_versus_d(prob: AllocationSolver, t, state: State, step):
@@ -196,3 +192,235 @@ def plot_alpha_versus_lambda(prob_generator: Callable[[], AllocationSolver], rep
     plt.ylabel(r"Optimal $\lambda$")
     plt.title(r"Optimal $\lambda$ versus $\alpha$")
     plt.legend()
+
+###
+### Plots for the final report
+###
+
+def generate_data(prob: AllocationSolver, algos, n=1000, debug=False, tol=0.01):
+    """
+    Uses supply equal to the expected demand.
+
+    Returns (x-axis, y-axis) for each of the four graphs (see synthetic_summary_plots).
+    """
+    num_agents = prob.N
+
+    # get metrics vs alpha for num_agents
+    if debug:
+        print("Starting metrics vs. alpha...")
+
+    alpha_values = np.array([0.1, 0.2, 0.5, 1, 2, 5, 10])
+    social_welfare_vs_alpha = np.zeros((len(algos), alpha_values.size, 2))
+    waste_vs_alpha = np.zeros((len(algos), alpha_values.size, 2))
+
+    for i, algo in enumerate(algos):
+        if debug: print(f"Starting {algo}...")
+        prob.change_allocation_method(algo)
+        for j, alpha in tqdm(enumerate(alpha_values)):
+            if debug: print(f"Alpha: {alpha}")
+            prob.change_alpha(alpha)
+            if algo == "lambda_time": prob.optimize_lambda(tol=tol, monte_carlo=True, batch=True)
+            results = prob.monte_carlo_performance_metrics_batched(n)
+            social_welfare_vs_alpha[i, j, :] = results["social_welfare"]
+            waste_vs_alpha[i, j, :] = results["waste"]
+
+    # the last two plots are for alpha = infinity
+    prob.change_alpha(np.inf)
+
+    # get metrics for arrival order with 100 agents
+    fill_rates = np.zeros((len(algos), num_agents, 2))
+
+    if debug:
+        print("Starting arrival order vs. fill rates...")
+
+    for i, algo in enumerate(algos):
+        if debug: print(f"Starting {algo}...")
+        if algo == "lambda_time": prob.optimize_lambda(tol=tol, monte_carlo=True, batch=True)
+        prob.change_allocation_method(algo)
+        results = prob.monte_carlo_performance_metrics_batched(n)
+        fill_rates[i, :, :] = results["fill_rates"]
+
+    agent_position_vector = np.arange(1, num_agents + 1)
+
+    # get fill rate vs uncertainty of each agent
+    uncertainty_vector = np.array([dist.stddev_val for dist in prob.demand_distributions])
+    fill_rate_versus_uncertainty = np.zeros((len(algos), uncertainty_vector.size))
+
+    if debug:
+        print("Starting fill rate vs. uncertainty...")    
+
+    # rearrange the agents by uncertainty
+    agent_order = np.argsort(uncertainty_vector)
+    # rearrange the 1st axis of fill_rates
+    fill_rate_versus_uncertainty = (fill_rates[:, agent_order, 0] + fill_rates[:, agent_order, 1]) / 2
+
+    return (alpha_values, social_welfare_vs_alpha), (alpha_values, waste_vs_alpha), (agent_position_vector, fill_rates), (uncertainty_vector, fill_rate_versus_uncertainty)
+
+def save_data(data, filename):
+    # where the data has the form
+    # (alpha_values, social_welfare_vs_alpha), (alpha_values, waste_vs_alpha), (agent_position_vector, fill_rates), (uncertainty_vector, fill_rate_versus_uncertainty)
+    # with appropriate keywords
+
+    # save to ../../data/
+    np.savez(f"../../data/{filename}.npz",
+        alpha_values=data[0][0],
+        social_welfare_vs_alpha=data[0][1],
+        waste_vs_alpha=data[1][1],
+        agent_position_vector=data[2][0],
+        fill_rates=data[2][1],
+        uncertainty_vector=data[3][0],
+        fill_rate_versus_uncertainty=data[3][1]
+    )
+
+def load_data(filename):
+    data = np.load(f"../../data/{filename}.npz")
+    return (
+        (data["alpha_values"], data["social_welfare_vs_alpha"]),
+        (data["alpha_values"], data["waste_vs_alpha"]),
+        (data["agent_position_vector"], data["fill_rates"]),
+        (data["uncertainty_vector"], data["fill_rate_versus_uncertainty"])
+    )
+
+def summary_plots(data, algos):
+    """
+    Top left: social welfare vs. alpha, with greedy as the baseline (normalized to 1)
+    Top right: waste vs. alpha
+    Bottom left: fill rate vs. arrival order
+    Bottom right: fill rate vs. uncertainty
+
+    NOTE: In general, the numpy arrays are of shape (num_algos, num_x_axis_values, 2)
+    where the last dimension is (upper bound, lower bound). The confidence interval
+    is symmetric, so the center line is the mean of the two bounds.
+    """
+    # seaborn style for report
+    sns.set_context("paper")
+    sns.set_style("whitegrid")
+
+    fig, axs = plt.subplots(2, 2, figsize=(12, 12))
+
+    # unpack the data
+    alpha_values, social_welfare_vs_alpha = data[0]
+    _, waste_vs_alpha = data[1]
+    agent_position_vector, fill_rates = data[2]
+    uncertainty_vector, fill_rate_versus_uncertainty = data[3]
+
+    # plot social welfare vs alpha
+    for i, algo in enumerate(algos):
+        average = (social_welfare_vs_alpha[i, :, 0] + social_welfare_vs_alpha[i, :, 1]) / 2
+        sns.lineplot(x=alpha_values, y=average, label=map_algo_to_name[algo], color=map_algo_to_color[algo], ax=axs[0, 0])
+        axs[0, 0].fill_between(alpha_values, social_welfare_vs_alpha[i, :, 1], social_welfare_vs_alpha[i, :, 0], alpha=0.1, color=map_algo_to_color[algo])
+
+    axs[0, 0].set_xlabel(r"Alpha ($\alpha$)")
+    axs[0, 0].set_ylabel("Expected Social Welfare")
+    axs[0, 0].set_title(rf"Expected Social Welfare vs. Alpha ($\alpha$) for {agent_position_vector.max()} agents")
+
+    # plot waste vs alpha
+    for i, algo in enumerate(algos):
+        # omit from plot because it's too high
+        if algo == "guarantee": continue
+        average = (waste_vs_alpha[i, :, 0] + waste_vs_alpha[i, :, 1]) / 2
+        sns.lineplot(x=alpha_values, y=average, label=map_algo_to_name[algo], color=map_algo_to_color[algo], ax=axs[0, 1])
+        axs[0, 1].fill_between(alpha_values, waste_vs_alpha[i, :, 1], waste_vs_alpha[i, :, 0], alpha=0.1, color=map_algo_to_color[algo])
+
+    axs[0, 1].set_xlabel(r"Alpha ($\alpha$)")
+    axs[0, 1].set_ylabel("Expected Waste")
+    axs[0, 1].set_title(rf"Expected Waste vs. Alpha ($\alpha$) for {agent_position_vector.max()} agents")
+
+    # plot fill rates for arrival order
+    for i, algo in enumerate(algos):
+        average = (fill_rates[i, :, 0] + fill_rates[i, :, 1]) / 2
+        sns.lineplot(x=np.arange(1, agent_position_vector.size + 1), y=average, label=map_algo_to_name[algo], color=map_algo_to_color[algo], ax=axs[1, 0])
+        axs[1, 0].fill_between(np.arange(1, agent_position_vector.size + 1), fill_rates[i, :, 1], fill_rates[i, :, 0], alpha=0.1, color=map_algo_to_color[algo])
+
+    axs[1, 0].set_xlabel("Arrival Order")
+    axs[1, 0].set_ylabel(r"Fill Rate ($\beta_i$)")
+    axs[1, 0].set_title(r"Fill Rate vs. Arrival Order for $\alpha=\infty$")
+    axs[1, 0].legend()
+
+    # scatterplot of fill rate vs uncertainty
+    for i, algo in enumerate(algos):
+        sns.scatterplot(x=uncertainty_vector, y=fill_rate_versus_uncertainty[i], label=map_algo_to_name[algo], color=map_algo_to_color[algo], ax=axs[1, 1])
+    
+    axs[1, 1].set_xlabel(r"Standard Deviation of Demand ($\sigma_i$)")
+    axs[1, 1].set_ylabel(r"Fill Rate ($\beta_i$)")
+    axs[1, 1].set_title(r"Fill Rate vs. Uncertainty for $\alpha=\infty$")
+    axs[1, 1].legend()
+    
+    plt.tight_layout()
+
+
+def generate_scarcity_data(prob: AllocationSolver, algos, n=1000, debug=False, tol=0.01):
+    """
+    Get supply scarcity vs social welfare for alpha = [0, 1, 2, infty].
+    """
+    alpha_values = np.array([0, 1, 2, np.inf])
+    scarcity_values = np.arange(0.1, 1.5, 0.1)
+    social_welfare_vs_alpha_and_scarcity = np.zeros((len(algos), alpha_values.size, scarcity_values.size, 2))
+
+    for i, algo in enumerate(algos):
+        if debug: print(f"Starting {algo}...")
+        prob.change_allocation_method(algo)
+        for j, alpha in tqdm(enumerate(alpha_values)):
+            if debug: print(f"Alpha: {alpha}")
+            prob.change_alpha(alpha)
+            for k, scarcity in enumerate(scarcity_values):
+                prob.change_initial_supply(scarcity * sum(prob.demand_means))
+                if algo == "lambda_time": prob.optimize_lambda(tol=tol, monte_carlo=True, batch=True)
+                results = prob.monte_carlo_performance_metrics_batched(n)
+                social_welfare_vs_alpha_and_scarcity[i, j, k, :] = results["social_welfare"]
+
+    return (alpha_values, scarcity_values, social_welfare_vs_alpha_and_scarcity)
+
+def save_scarcity_data(data, filename):
+    # where the data has the form
+    # (alpha_values, scarcity_values, social_welfare_vs_alpha_and_scarcity)
+
+    # save to ../../data/
+    np.savez(f"../../data/{filename}.npz",
+        alpha_values=data[0],
+        scarcity_values=data[1],
+        social_welfare_vs_alpha_and_scarcity=data[2]
+    )
+
+def load_scarcity_data(filename):
+    data = np.load(f"../../data/{filename}.npz")
+    return (
+        data["alpha_values"],
+        data["scarcity_values"],
+        data["social_welfare_vs_alpha_and_scarcity"]
+    )
+
+def scarcity_plots(data, algos):
+    """
+    Top left: alpha = 0
+    Top right: alpha = 1
+    Bottom left: alpha = 2
+    Bottom right: alpha = infinity
+
+    NOTE: In general, the numpy arrays are of shape (num_algos, num_x_axis_values, num_y_axis_values, 2)
+    where the last dimension is (upper bound, lower bound). The confidence interval
+    is symmetric, so the center line is the mean of the two bounds.
+    """
+    # seaborn style for report
+    sns.set_context("paper")
+    sns.set_style("whitegrid")
+
+    fig, axs = plt.subplots(2, 2, figsize=(12, 12))
+
+    # unpack the data
+    alpha_values, scarcity_values, social_welfare_vs_alpha_and_scarcity = data
+
+    # plot social welfare vs alpha
+    for i, algo in enumerate(algos):
+        for j, alpha in enumerate(alpha_values):
+            average = (social_welfare_vs_alpha_and_scarcity[i, j, :, 0] + social_welfare_vs_alpha_and_scarcity[i, j, :, 1]) / 2
+            sns.lineplot(x=scarcity_values, y=average, label=map_algo_to_name[algo], color=map_algo_to_color[algo], ax=axs[j // 2, j % 2])
+            axs[j // 2, j % 2].fill_between(scarcity_values, social_welfare_vs_alpha_and_scarcity[i, j, :, 1], social_welfare_vs_alpha_and_scarcity[i, j, :, 0], alpha=0.1, color=map_algo_to_color[algo])
+            axs[j // 2, j % 2].set_xlabel("Supply Scarcity")
+            axs[j // 2, j % 2].set_ylabel("Expected Social Welfare")
+            axs[j // 2, j % 2].set_title(rf"Expected Social Welfare vs. Initial Supply Scarcity for $\alpha={alpha}$")
+
+            # set ylim to 0, 1
+            axs[j // 2, j % 2].set_ylim(0, 1.05)
+
+    plt.tight_layout()

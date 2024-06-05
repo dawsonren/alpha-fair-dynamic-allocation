@@ -4,6 +4,7 @@ Provide functions for calculating metrics.
 import math
 
 import numpy as np
+from scipy.stats import norm
 
 def social_welfare_relative(alpha):
     """
@@ -47,3 +48,20 @@ def max_envy(allocs: np.ndarray, demands: np.ndarray):
     """
     fill_rates = np.minimum(allocs / demands, np.ones_like(allocs))
     return np.max(fill_rates, axis=1) - np.min(fill_rates, axis=1)
+
+def calculate_fill_rates(allocs: np.ndarray, demands: np.ndarray):
+    """
+    Calculate the fill rates.
+    """
+    return np.minimum(allocs / demands, np.ones_like(allocs))
+
+def confidence_interval(data, confidence=0.95):
+    """
+    Calculate the confidence interval for the data.
+    """
+    n = len(data)
+    m = np.mean(data)
+    s = np.std(data)
+    # for provide confidence level, calculate z
+    z = norm.ppf(1 - (1 - confidence) / 2)
+    return m - z * s / math.sqrt(n), m + z * s / math.sqrt(n)
